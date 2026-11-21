@@ -5,7 +5,7 @@ edition = "2021"
 # clap 4.5 needs 1.74; the code itself builds on 1.75, the toolchain the
 # project is built and tested with.
 rust-version = "1.75"
-description = "MPEG transport stream toolkit: PCR-paced playback, UDP/RTP send and receive, live monitoring and analysis, with KLV (MISB ST 0601) awareness"
+description = "MPEG transport stream toolkit: PCR-paced playback, UDP/RTP send and receive, KLV injection, live monitoring and analysis"
 repository = "https://github.com/notley-technologies/tsflow-rs"
 readme = "README.md"
 keywords = ["mpeg-ts", "transport-stream", "udp", "rtp", "klv"]
