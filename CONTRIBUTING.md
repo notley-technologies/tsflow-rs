@@ -49,6 +49,7 @@ cargo run --release --example throughput -- 600
 ## Guidelines
 
 - **Tests.** Fixes come with a test that fails without the fix. Test data is synthetic: build it with `tests/common/mod.rs`, never from captured streams.
+- **No wall clock in tests.** Anything timed is tested through `Clock` with `ManualClock` (like .NET's `TimeProvider`), never by sleeping, waiting for "long enough", or asserting on measured durations, jitter or speed. Tests on real sockets or the binary check data, synchronise on events (a "listening" line, an exact `--count`, a receiver's progress) and use real time only as a hang guard that fails the test. Speed belongs in benchmarks and examples, not assertions.
 - **I/O lives here.** `mpegts` and `misb` never do I/O or read clocks; when something can be done without I/O, it belongs in one of them. Everything here that reads the time goes through `Clock`, so it can be tested without waiting.
 - **Bounded memory.** Anything that buffers data has a fixed limit, documented where it is kept. Hostile input must not be able to grow memory.
 - **No panics, no `unsafe`.** Damaged input is skipped and counted, never unwrapped. Arithmetic on values from the stream saturates or is checked.

@@ -219,37 +219,63 @@ fn errors_and_strict() {
     }
 }
 
+/// Start `tsflow recv` and wait for its "listening" line, so nothing is
+/// sent before the socket exists (no sleeping).
+fn start_recv(args: &[&str]) -> (std::process::Child, std::thread::JoinHandle<String>) {
+    use std::io::{BufRead, BufReader, Read};
+    let mut child = tsflow().arg("recv").args(args).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    let mut stderr = BufReader::new(child.stderr.take().unwrap());
+    let mut line = String::new();
+    stderr.read_line(&mut line).unwrap();
+    assert!(line.contains("listening on"), "{line}");
+    let drain = std::thread::spawn(move || {
+        let mut rest = String::new();
+        let _ = stderr.read_to_string(&mut rest);
+        line + &rest
+    });
+    (child, drain)
+}
+
 #[test]
 fn paced_to_a_socket_and_received() {
     let input = temp_file("inject-udp-in.ts", &video(50).data);
     let packets: Vec<Vec<u8>> = (0..15).map(|k| packet(MISP_START + k * 100_000)).collect();
     let klv = temp_file("inject-udp.klv", &packets.concat());
-    let port = 15_000 + (std::process::id() % 5000) as u16;
-    let listen = format!("udp://@127.0.0.1:{port}");
-    let send = format!("udp://127.0.0.1:{port}");
-    let recv = tsflow()
-        .args([
-            "recv",
-            &listen,
-            "--idle-exit",
-            "1",
-            "--expect",
-            "klv-marking=US//UNCLASSIFIED",
-            "--expect",
-            "no-cc-errors",
-            "-q",
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(300));
-    let o = run(&["inject", input.to_str().unwrap(), &send, "--klv", klv.to_str().unwrap(), "-q"]);
+    // The output to a file first: the same input and metadata give the same
+    // packets, so the receiver can stop on their exact count.
+    let file = temp_path("inject-udp-out.ts");
+    let o = run(&["inject", input.to_str().unwrap(), file.to_str().unwrap(), "--klv", klv.to_str().unwrap(), "-q"]);
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o.stderr));
+    let count = (std::fs::read(&file).unwrap().len() / PACKET_SIZE).to_string();
+    let port = std::net::UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let (recv, stderr) = start_recv(&[
+        &format!("udp://127.0.0.1:{port}"),
+        "--count",
+        &count,
+        "--duration",
+        "60",
+        "--expect",
+        "klv-marking=US//UNCLASSIFIED",
+        "--expect",
+        "no-cc-errors",
+        "--json",
+    ]);
+    let o = run(&[
+        "inject",
+        input.to_str().unwrap(),
+        &format!("udp://127.0.0.1:{port}"),
+        "--klv",
+        klv.to_str().unwrap(),
+        "-q",
+    ]);
     assert_eq!(o.status.code(), Some(0), "{}", text(&o.stderr));
     assert!(text(&o.stderr).contains("paced"), "{}", text(&o.stderr));
     let r = recv.wait_with_output().unwrap();
-    assert_eq!(r.status.code(), Some(0), "{}\n{}", text(&r.stdout), text(&r.stderr));
-    for p in [input, klv] {
+    let json = text(&r.stdout);
+    assert_eq!(r.status.code(), Some(0), "{json}\n{}", stderr.join().unwrap());
+    assert!(json.contains("\"stopped\":\"packet count reached\""), "{json}");
+    assert!(json.contains(&format!("\"packets\":{count}")), "{json}");
+    for p in [input, klv, file] {
         std::fs::remove_file(p).unwrap();
     }
 }

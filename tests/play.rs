@@ -97,6 +97,39 @@ fn every_datagram_leaves_exactly_when_its_last_packet_is_due() {
     assert_eq!(clock.elapsed(), Duration::from_millis(100) + ticks_to_duration(pos[s.packets - 1]));
 }
 
+/// What a receiver measures of that pacing, still on the simulated clock:
+/// the send times are fed to the monitor as arrival times. A datagram
+/// leaves when its last packet is due, so a PCR packet waits at most six
+/// packet times for the rest of its datagram: that is the whole arrival
+/// jitter, and the arrivals span the stream exactly.
+#[test]
+fn a_receiver_measures_the_pacing_exactly() {
+    let s = generate(&Synth::frames(50));
+    let path = temp_file("receiver-view.ts", &s.data);
+    let clock = ManualClock::new();
+    let mut sink = Capture { clock: &clock, sends: Vec::new() };
+    play::play(&mut open(&path), &mut sink, &config(50), &clock, &AtomicBool::new(false), &mut |_| {}).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    // Only differences between instants matter; any base instant works.
+    let origin = std::time::Instant::now();
+    let mut m = Monitor::new().unwrap();
+    for (at, packets, _) in &sink.sends {
+        m.push(packets, Some(origin + *at));
+    }
+    m.finish();
+    let r = m.summary();
+    assert_eq!((r.packets, r.cc_errors), (s.packets as u64, 0));
+    let six_packets = ticks_to_duration(6 * TICKS_PER_PACKET).as_secs_f64() * 1e3;
+    let jitter = r.pcr[0].jitter_pp_ms.unwrap();
+    assert!(jitter <= six_packets + 1e-6, "PCR arrival jitter {jitter} ms, at most {six_packets} ms");
+    assert!(jitter > 0.0, "the PCR packets do wait for their datagrams");
+    let first = sink.sends.first().unwrap().0;
+    let last = sink.sends.last().unwrap().0;
+    assert_eq!(r.wall_duration, Some(last - first));
+    let pos = positions(&s.data);
+    assert_eq!(last - first, ticks_to_duration(pos[s.packets - 1]) - ticks_to_duration(pos[6]));
+}
+
 #[test]
 fn looping_keeps_positions_continuous_and_the_stream_valid() {
     let s = generate(&Synth::frames(25));
@@ -139,23 +172,16 @@ fn unpaced_copy_converts_m2ts_and_loops_to_a_file() {
     let mut output = Output::open(&Endpoint::File(out.clone()), None).unwrap();
     let mut cfg = config(0);
     cfg.pace = false;
-    let stats: PlayStats = play::play(
-        &mut open(&m2ts),
-        &mut output,
-        &cfg,
-        &tsflow::clock::SystemClock,
-        &AtomicBool::new(false),
-        &mut |_| {},
-    )
-    .unwrap();
+    let clock = ManualClock::new();
+    let stats: PlayStats =
+        play::play(&mut open(&m2ts), &mut output, &cfg, &clock, &AtomicBool::new(false), &mut |_| {}).unwrap();
     drop(output);
     assert_eq!(stats.packets_out, s.packets as u64);
     assert_eq!(std::fs::read(&out).unwrap(), s.data);
     // Two passes, as fast as possible.
     cfg.passes = Some(2);
     let mut output = Output::open(&Endpoint::File(out.clone()), None).unwrap();
-    play::play(&mut open(&m2ts), &mut output, &cfg, &tsflow::clock::SystemClock, &AtomicBool::new(false), &mut |_| {})
-        .unwrap();
+    play::play(&mut open(&m2ts), &mut output, &cfg, &clock, &AtomicBool::new(false), &mut |_| {}).unwrap();
     drop(output);
     let r = analyze(&out);
     assert_eq!((r.packets, r.cc_errors, r.pcr[0].discontinuities), (2 * s.packets as u64, 0, 1));

@@ -90,12 +90,13 @@ fn play_to_recv_with_expectations() {
         let port = free_port();
         let input = format!("udp://127.0.0.1:{port}");
         let expect = format!("klv-marking={marking}");
+        // Stops on the exact packet count; --duration is only a hang guard.
         let (child, stderr) = start_recv(&[
             &input,
-            "--idle-exit",
-            "0.7",
+            "--count",
+            "3200",
             "--duration",
-            "30",
+            "60",
             "--expect",
             &expect,
             "--expect",
@@ -112,7 +113,7 @@ fn play_to_recv_with_expectations() {
         let out = child.wait_with_output().unwrap();
         let json = text(&out.stdout);
         assert_eq!(out.status.code(), Some(status), "{json}\n{}", stderr.join().unwrap());
-        assert!(json.contains("\"stopped\":\"input went quiet\""), "{json}");
+        assert!(json.contains("\"stopped\":\"packet count reached\""), "{json}");
         assert!(json.contains("\"packets\":3200"), "{json}");
     }
     std::fs::remove_file(path).unwrap();

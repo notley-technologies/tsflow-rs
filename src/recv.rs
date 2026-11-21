@@ -1,8 +1,9 @@
 //! Receiving and monitoring a stream, with optional forwarding and
 //! recording.
 //!
-//! [`run`] reads an input until it ends, goes quiet, runs for a set time or
-//! is stopped, feeding a [`Monitor`]. Forwarding passes every datagram on
+//! [`run`] reads an input until it ends, goes quiet, runs for a set time,
+//! has delivered a set number of packets or is stopped, feeding a
+//! [`Monitor`]. Forwarding passes every datagram on
 //! as received, before analysis, so a player can watch the stream being
 //! monitored (a UDP port has one reader; VLC cannot bind the port the
 //! monitor holds). Recording writes the TS packets to a file.
@@ -27,13 +28,17 @@ pub struct RecvConfig {
     pub idle_exit: Option<Duration>,
     /// Stop after this long, whatever arrives.
     pub duration: Option<Duration>,
+    /// Stop once at least this many TS packets have arrived (a datagram is
+    /// never split, so up to one datagram more may be counted). Unlike the
+    /// two time limits it does not depend on the clock.
+    pub max_packets: Option<u64>,
     /// How often the status callback runs.
     pub status_interval: Duration,
 }
 
 impl Default for RecvConfig {
     fn default() -> Self {
-        RecvConfig { idle_exit: None, duration: None, status_interval: Duration::from_secs(1) }
+        RecvConfig { idle_exit: None, duration: None, max_packets: None, status_interval: Duration::from_secs(1) }
     }
 }
 
@@ -47,6 +52,8 @@ pub enum StopReason {
     Idle,
     /// The configured duration passed.
     Duration,
+    /// The configured number of packets arrived.
+    Count,
     /// The stop flag was set (Ctrl-C).
     Interrupted,
 }
@@ -58,6 +65,7 @@ impl StopReason {
             StopReason::EndOfInput => "end of input",
             StopReason::Idle => "input went quiet",
             StopReason::Duration => "duration reached",
+            StopReason::Count => "packet count reached",
             StopReason::Interrupted => "interrupted",
         }
     }
@@ -83,6 +91,7 @@ pub fn run(
     let interval = cfg.status_interval.max(Duration::from_millis(1));
     let mut next_status = start + interval;
     let mut last_data: Option<Instant> = None;
+    let mut packets = 0u64;
     let reason = loop {
         if stop.load(Ordering::Relaxed) {
             break StopReason::Interrupted;
@@ -124,6 +133,10 @@ pub fn run(
                     out.send(chunk.packets, 0).map_err(|e| Error::io(format!("write {}", out.description()), e))?;
                 }
                 monitor.push(chunk.packets, live.then_some(arrival));
+                packets += (chunk.packets.len() / crate::PACKET_SIZE) as u64;
+                if cfg.max_packets.is_some_and(|max| packets >= max) {
+                    break StopReason::Count;
+                }
             }
             ReadEvent::Idle => {}
             ReadEvent::End => break StopReason::EndOfInput,

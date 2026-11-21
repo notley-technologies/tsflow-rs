@@ -16,7 +16,7 @@ tsflow is the I/O half of a family of crates. The libraries never touch a file, 
 
 ```text
 tsflow play     <INPUT> <OUTPUT> [--loop | --passes N] [--latency MS] [--burst N] [--rate-fallback BPS] [--pcr-pid PID] [--no-pace]
-tsflow recv     <INPUT> [--forward OUTPUT] [--out FILE] [--idle-exit S] [--duration S] [--expect CHECK]... [--json]
+tsflow recv     <INPUT> [--forward OUTPUT] [--out FILE] [--idle-exit S] [--duration S] [--count N] [--expect CHECK]... [--json]
 tsflow analyze  <FILE> [--expect CHECK]... [--json]
 tsflow inject   <INPUT> <OUTPUT> (--klv FILE | --ndjson FILE) [--mode sync|async] [--rate RATE] [--anchor ANCHOR] [--snap]
                 [--existing keep|replace|fail] [--program N] [--pid PID] [--cbr [--drop-on-overflow]] [--pace | --no-pace] [--strict] [--json]
@@ -105,7 +105,7 @@ What it measures:
 
 `--forward` passes every datagram on as it arrived, before analysis: byte for byte when the framing matches (RTP to `rtp://`, raw to `udp://`), re-framed otherwise. A UDP port has one reader, so a player cannot bind the port the monitor holds; forwarding solves that. `--out` records the TS packets (RTP removed).
 
-The run ends at the end of a file or pipe, when nothing has arrived for `--idle-exit` seconds (counted from the first datagram, so the receiver can start before the sender), after `--duration` seconds, or on Ctrl-C. The summary goes to standard output, the status lines to standard error.
+The run ends at the end of a file or pipe, when nothing has arrived for `--idle-exit` seconds (counted from the first datagram, so the receiver can start before the sender), after `--duration` seconds, once `--count` TS packets have arrived (exact, independent of timing, useful in scripts that know what they sent), or on Ctrl-C. The summary goes to standard output, the status lines to standard error.
 
 ### analyze
 
@@ -275,7 +275,9 @@ cargo test
 TSFLOW_FUZZ_ITERATIONS=20000 cargo test --release --test robustness
 ```
 
-Every test stream is synthetic, generated in code with the `mpegts::mux` writers and `misb::encode` (`tests/common/mod.rs`): PAT/PMT, H.264-like video PES with PTS and PCR, synchronous KLV in metadata access units, asynchronous KLV, null packet stuffing. Unit tests cover endpoint parsing, RTP, the framer (all record sizes, any chunking, damage), the schedule (exact due times, re-anchoring, no drift over a simulated 24 hours), datagram grouping, the loop fixer and the checks. Integration tests play streams on a simulated clock (every datagram leaves exactly when its last packet is due), play and receive over real UDP and RTP sockets on 127.0.0.1 (every packet, no CC errors, pacing within tolerance, looping, forwarding), drive the binary (exit statuses, JSON, Ctrl-C), and feed mutated input to everything that parses.
+Every test stream is synthetic, generated in code with the `mpegts::mux` writers and `misb::encode` (`tests/common/mod.rs`): PAT/PMT, H.264-like video PES with PTS and PCR, synchronous KLV in metadata access units, asynchronous KLV, null packet stuffing. Unit tests cover endpoint parsing, RTP, the framer (all record sizes, any chunking, damage), the schedule (exact due times, re-anchoring, no drift over a simulated 24 hours), datagram grouping, the loop fixer and the checks. Integration tests play streams on a simulated clock (every datagram leaves exactly when its last packet is due, and the monitor measures that pacing exactly), play and receive over real UDP and RTP sockets on 127.0.0.1 (every byte in order, no CC errors, RTP numbering, looping, forwarding byte for byte), drive the binary (exit statuses, JSON, Ctrl-C), and feed mutated input to everything that parses.
+
+No test measures the real clock. Timing is tested on `ManualClock`; socket and binary tests check data only, send in lockstep with the receiver rather than at real-time pace, and stop on exact packet counts or a process's "listening" line, with real time used only as a hang guard. They pass the same on a loaded laptop and on a slow CI virtual machine.
 
 `cargo run --release --example synth -- test.ts 60` writes such a stream for manual tests, for example `tsflow play test.ts udp://127.0.0.1:5000 --loop` with VLC on `udp://@:5000`.
 

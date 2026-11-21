@@ -25,7 +25,7 @@ Expectations (repeat --expect; exit status 1 when one fails):
 
 Status lines go to standard error once a second; the summary (or --json)
 goes to standard output when the input ends, goes quiet (--idle-exit), the
---duration passes, or on Ctrl-C.";
+--duration passes, --count packets have arrived, or on Ctrl-C.";
 
 #[derive(clap::Args)]
 #[command(after_help = AFTER_HELP)]
@@ -48,6 +48,10 @@ pub struct Args {
     /// Stop after S seconds
     #[arg(long, value_name = "S", value_parser = parse_seconds)]
     duration: Option<Duration>,
+
+    /// Stop once N TS packets have arrived
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u64).range(1..))]
+    count: Option<u64>,
 
     /// Fail (exit status 1) unless this holds; may be repeated
     #[arg(long, value_name = "EXPECTATION")]
@@ -83,6 +87,7 @@ pub fn run(a: Args, ctx: &Context) -> Result<ExitCode, Error> {
     let mut cfg = RecvConfig::default();
     cfg.idle_exit = a.idle_exit;
     cfg.duration = a.duration;
+    cfg.max_packets = a.count;
     let start = Instant::now();
     let mut revision = monitor.revision();
     let quiet = ctx.quiet;
