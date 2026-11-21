@@ -279,3 +279,127 @@ fn paced_to_a_socket_and_received() {
         std::fs::remove_file(p).unwrap();
     }
 }
+
+#[test]
+fn live_from_a_file_with_initial_values() {
+    let s = video(40);
+    let input = temp_file("live-cli-in.ts", &s.data);
+    let output = temp_path("live-cli-out.ts");
+    let state = temp_file(
+        "live-cli-state.ndjson",
+        b"{\"set\": {\"SensorLatitude\": 38.8977, \"SensorLongitude\": -77.0365, \"MissionId\": \"LIVE-CLI\"}}\n\n{\"unknown\": [\"SlantRange\"]}\n",
+    );
+    let out = run(&[
+        "live",
+        input.to_str().unwrap(),
+        output.to_str().unwrap(),
+        "--state",
+        state.to_str().unwrap(),
+        "--rate",
+        "frame",
+        "--json",
+        "-q",
+    ]);
+    let stderr = text(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    assert!(stderr.contains("end of input") && stderr.contains("40 frames, 40 KLV units"), "{stderr}");
+    let summary = text(&out.stdout);
+    assert!(summary.starts_with("{\"stop\":\"end of input\"") && summary.contains("\"units\":40,"), "{summary}");
+    let ts = std::fs::read(&output).unwrap();
+    let units = read_back(&ts, Codec::KlvSync);
+    assert_eq!(units.len(), 40);
+    for (_, bytes) in &units {
+        let p = misb::decode(bytes).unwrap();
+        assert!(p.is_ok());
+        assert_eq!(p.get(Tag::MissionId).and_then(misb::Value::as_str), Some("LIVE-CLI"));
+        assert_eq!(p.get(Tag::SlantRange), Some(&misb::Value::Unknown));
+    }
+    oracles(&output, 40);
+    for p in [input, output, state] {
+        std::fs::remove_file(p).unwrap();
+    }
+}
+
+#[test]
+fn live_refuses_a_bad_state_line() {
+    let s = video(5);
+    let input = temp_file("live-cli-bad-in.ts", &s.data);
+    let state =
+        temp_file("live-cli-bad.ndjson", b"{\"set\": {\"SensorLatitude\": 1}}\n{\"set\": {\"SensorLatitude\": 100}}\n");
+    let out = run(&["live", input.to_str().unwrap(), "-", "--state", state.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = text(&out.stderr);
+    assert!(stderr.contains("line 2") && stderr.contains("Sensor Latitude"), "{stderr}");
+    let out = run(&["live", "-", "-", "--control", "-"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(text(&out.stderr).contains("cannot both come from standard input"));
+    for p in [input, state] {
+        std::fs::remove_file(p).unwrap();
+    }
+}
+
+#[test]
+fn ndjson_records_interpolated_at_frames() {
+    let input = temp_file("inject-interp-in.ts", &video(50).data);
+    // Two records 2 s apart; slant range and heading move between them,
+    // the mission name holds.
+    let lines = format!(
+        "{{\"time_us\": {}, \"items\": {{\"SlantRange\": 1000, \"PlatformHeadingAngle\": 350, \"MissionId\": \"IP\"}}}}\n\
+         {{\"time_us\": {}, \"items\": {{\"SlantRange\": 3000, \"PlatformHeadingAngle\": 10}}}}\n",
+        MISP_START,
+        MISP_START + 2_000_000
+    );
+    let nd = temp_file("inject-interp.ndjson", lines.as_bytes());
+    let output = temp_path("inject-interp-out.ts");
+    let o = run(&[
+        "inject",
+        input.to_str().unwrap(),
+        output.to_str().unwrap(),
+        "--ndjson",
+        nd.to_str().unwrap(),
+        "--rate",
+        "frame",
+        "--interpolate",
+    ]);
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o.stderr));
+    let units = read_back(&std::fs::read(&output).unwrap(), Codec::KlvSync);
+    assert_eq!(units.len(), 50, "every frame at 25 fps for 2 s");
+    for (n, (_, bytes)) in units.iter().enumerate() {
+        let p = misb::decode(bytes).unwrap();
+        let f = n as f64 / 50.0;
+        let range = p.get(Tag::SlantRange).and_then(misb::Value::as_f64).unwrap();
+        assert!((range - (1000.0 + 2000.0 * f)).abs() < 0.01, "frame {n}: {range}");
+        let heading = p.get(Tag::PlatformHeadingAngle).and_then(misb::Value::as_f64).unwrap();
+        let want = (350.0 + 20.0 * f) % 360.0;
+        assert!((heading - want).abs().min(360.0 - (heading - want).abs()) < 0.01, "frame {n}: {heading}");
+        assert_eq!(p.get(Tag::MissionId).and_then(misb::Value::as_str), Some("IP"));
+    }
+    for p in [input, nd, output] {
+        std::fs::remove_file(p).unwrap();
+    }
+}
+
+#[test]
+fn m2ts_records_stay_m2ts() {
+    let input = temp_file("inject-m2ts-in.m2ts", &to_m2ts(&video(40).data));
+    let mut lines = String::new();
+    for k in 0..20u64 {
+        lines += &format!("{{\"time_us\": {}, \"items\": {{\"SensorLatitude\": {}}}}}\n", MISP_START + k * 80_000, k);
+    }
+    let nd = temp_file("inject-m2ts.ndjson", lines.as_bytes());
+    let output = temp_path("inject-m2ts-out.m2ts");
+    let o =
+        run(&["inject", input.to_str().unwrap(), output.to_str().unwrap(), "--ndjson", nd.to_str().unwrap(), "--json"]);
+    let stderr = text(&o.stderr);
+    assert_eq!(o.status.code(), Some(0), "{stderr}");
+    assert!(stderr.contains("192-byte M2TS records kept"), "{stderr}");
+    assert!(text(&o.stdout).contains("\"units_inserted\":20"), "{}", text(&o.stdout));
+    let out = std::fs::read(&output).unwrap();
+    assert_eq!(out.len() % 192, 0);
+    assert!(out.chunks(192).all(|r| r[4] == 0x47), "every record holds a packet after its 4-byte header");
+    let ts: Vec<u8> = out.chunks(192).flat_map(|r| r[4..].to_vec()).collect();
+    assert_eq!(read_back(&ts, Codec::KlvSync).len(), 20);
+    for p in [input, nd, output] {
+        std::fs::remove_file(p).unwrap();
+    }
+}

@@ -8,6 +8,7 @@
 
 mod analyze;
 mod inject;
+mod live;
 mod play;
 mod recv;
 
@@ -43,7 +44,7 @@ Ctrl-C stops cleanly with a summary; a second Ctrl-C exits at once.";
 #[command(
     name = "tsflow",
     version,
-    about = "MPEG transport stream toolkit: real-time playback, UDP/RTP send and receive, monitoring, analysis",
+    about = "MPEG transport stream toolkit: real-time playback, UDP/RTP send and receive, monitoring, analysis, KLV injection (files and live)",
     after_help = AFTER_HELP
 )]
 struct Cli {
@@ -65,6 +66,8 @@ enum Command {
     Analyze(analyze::Args),
     /// Put a .klv or NDJSON metadata file into a stream as MISB ST 1402.2 KLV
     Inject(inject::Args),
+    /// Put KLV into a live stream from a control channel, as it passes
+    Live(live::Args),
 }
 
 /// What every subcommand gets.
@@ -93,6 +96,7 @@ pub fn main() -> ExitCode {
         Command::Recv(args) => recv::run(args, &ctx),
         Command::Analyze(args) => analyze::run(args, &ctx),
         Command::Inject(args) => inject::run(args, &ctx),
+        Command::Live(args) => live::run(args, &ctx),
     };
     match result {
         Ok(code) => code,

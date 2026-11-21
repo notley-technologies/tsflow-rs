@@ -1,6 +1,6 @@
 # tsflow
 
-An MPEG transport stream toolkit in the spirit of TSDuck, in Rust: real-time playback paced by the PCR, UDP and RTP send and receive (unicast, multicast, source-specific multicast), live monitoring with scriptable checks, and offline analysis, with first-class awareness of MISB KLV metadata.
+An MPEG transport stream toolkit in the spirit of TSDuck, in Rust: real-time playback paced by the PCR, UDP and RTP send and receive (unicast, multicast, source-specific multicast), live monitoring with scriptable checks, offline analysis, and MISB KLV injection from files or a live control channel, with first-class awareness of MISB KLV metadata.
 
 It is built for workloads where a stream must be right and a tool must not fall over: integer timing that does not drift over days, bounded memory whatever arrives, no panics on hostile input, no `unsafe`, and errors that say what was being done to which endpoint.
 
@@ -19,7 +19,10 @@ tsflow play     <INPUT> <OUTPUT> [--loop | --passes N] [--latency MS] [--burst N
 tsflow recv     <INPUT> [--forward OUTPUT] [--out FILE] [--idle-exit S] [--duration S] [--count N] [--expect CHECK]... [--json]
 tsflow analyze  <FILE> [--expect CHECK]... [--json]
 tsflow inject   <INPUT> <OUTPUT> (--klv FILE | --ndjson FILE) [--mode sync|async] [--rate RATE] [--anchor ANCHOR] [--snap]
+                [--interpolate] [--video-anchor] [--video-timestamps off|add|rewrite]
                 [--existing keep|replace|fail] [--program N] [--pid PID] [--cbr [--drop-on-overflow]] [--pace | --no-pace] [--strict] [--json]
+tsflow live     <INPUT> <OUTPUT> [--state FILE] [--control SOURCE]... [--mode sync|async] [--rate RATE] [--anchor ANCHOR]
+                [--video-anchor] [--video-timestamps off|add|rewrite] [--max-age MS] [--cbr] [--duration S] [--json]
 ```
 
 `-q` silences the once-a-second status lines; `tsflow <command> --help` lists everything.
@@ -162,12 +165,43 @@ tsflow inject: 100 KLV units inserted from 100 samples; 8000 packets in, 7980 ou
 - **Timing.** Synchronous KLV arrives 990 ms to 1 ms before its PTS, right before its video frame (ISO/IEC 13818-1, MISB ST 1402.2). Samples that would be late are counted, never sent late; `--strict` turns any sample left out into exit status 1.
 - **Rate.** Inserted packets add to the bitrate by default. `--cbr` keeps the packet count and every PCR where it was by putting the KLV and table packets in place of null packets, and stops (or with `--drop-on-overflow` drops and counts) when there is no room.
 - **Pacing.** A socket output is paced by the PCR like `play` (`--latency`, `--burst`); a file output is written as fast as possible unless `--pace`. A socket input works too (live injection with a file's metadata and an explicit anchor).
+- **Interpolation.** With a frame rate, `--interpolate` moves each item between the records that carry it (linear, the short way around for angles, along the great circle for positions, held for text and codes; a record's `"interpolate"` object overrides an item), so a flight log at 1 Hz gives smooth values at every frame.
+- **Video timestamps.** `--video-anchor` takes MISP time from the input video's MISB ST 0604 timestamps (H.264, H.265, MPEG-2) when it has them, ahead of `--anchor`. `--video-timestamps add` writes an ST 0604 timestamp into every H.264 or H.265 access unit that lacks one (`rewrite`: every access unit, replacing existing ones), with the anchor's time, so the video and the metadata share one clock; only the video PES that change are re-packetized (`--time-locked` asserts lock in the Time Status, `--nanoseconds` writes the H.265 nanosecond form).
+
+- **M2TS.** A 192-byte M2TS file written to a file stays M2TS: each record keeps its arrival time stamp, and inserted packets get stamps between their neighbours'. Paced or sent to a socket, it goes out as 188-byte TS.
 
 The work is done by the libraries: `misb::mux::FileMux` schedules the samples and the `mpegts` injector places them; tsflow reads the files and sockets.
 
+### live
+
+Puts KLV into a live stream as it passes, with the values coming from a control channel: each video frame the rate admits gets one ST 0601 packet built from the current values, tag 2 being the frame's MISP time and (synchronous) its PTS the frame's PTS, sent right before the frame. A change shows on the next frame.
+
+```bash
+tsflow live udp://@:5000 udp://10.0.0.5:5000 --state start.ndjson --control udp://127.0.0.1:6000
+ffmpeg -re -i camera.ts -c copy -f mpegts - | tsflow live - udp://239.1.1.1:5000 --control unix:/run/klv.sock --video-timestamps add
+echo '{"set": {"SensorLatitude": 38.8977, "PlatformHeadingAngle": 271.5}, "emit": true}' | nc -u -w0 127.0.0.1 6000
+```
+
+A test pattern encoded with libx264 (B-frames, 15 fps), with initial values from `--state` and ST 0604 timestamps added, `tsflow live x264.ts out.ts --state state.ndjson --video-timestamps add -q` prints:
+
+```text
+tsflow live: listening on x264.ts -> out.ts (sync KLV, ST 0604 in the video)
+tsflow live: program 1 (PMT 0x1000), KLV on PID 0x0101, service 0
+tsflow live: anchor PTS 138000 = 2026-11-21T21:22:10.412841Z
+tsflow live: end of input after 0.0 s; 765 packets in, 894 out; 60 frames, 60 KLV units (0 on request, 0 with nothing set, 0 refused); 0 control lines, 0 refused; ST 0604 timestamps: 0 found, 60 written
+```
+
+- **Control lines.** One JSON object per line (the `misb::json` commands): `{"set": {...}}` with keys and values as in `inject --ndjson` records (`null` sends an item as unknown), `{"unknown": [...]}`, `{"clear": [...]}`, `{"clear_all": true}`, `{"version": 19}`, `{"emit": true}` for a packet now. A line is applied whole or not at all, between two packets; a refused line is reported on standard error and changes nothing. They come from `--control -` (standard input), `udp://@:PORT` (one or more lines per datagram), `unix:PATH` (a socket any number of clients write to) or a file; `--state FILE` applies lines before the stream starts.
+- **Latency.** The output leaves as the input arrives: nothing is paced or buffered, and the injector extrapolates the program clock instead of waiting for the next PCR. Only `--video-timestamps` holds each frame until its first slice has been read. A file input is read as fast as possible; play it through `tsflow play FILE -` for real time.
+- **Anchor.** `wall` (default): the first frame is at the wall-clock time it arrived, again after a clock discontinuity; `first-frame=TIME` or `pts=PTS@TIME` as in `inject`; `--video-anchor` puts the video's ST 0604 timestamps first.
+- **Staleness.** `--max-age MS` leaves out (or with `--stale-unknown` marks unknown) any value older than that, so a dead sensor feed is not reported forever.
+- **The rest** (`--existing`, `--program`, `--pid`, `--service-id`, `--cbr`, `--psi-interval`) works as in `inject`. `--duration`, `--idle-exit` and `--count` end a run; `--json` prints the summary as JSON.
+
+The work is done by `misb::mux::LiveMux`; tsflow reads the sockets and the control channel and keeps the wall clock.
+
 ### Planned
 
-- `tsflow replace`: strip a stream's KLV and write new KLV (for example with a different ST 0102 marking), live, at the stream's pace, and live injection driven by a control channel (MUXING_PLAN.md phase 5).
+- `tsflow replace`: strip a stream's KLV and write new KLV (for example with a different ST 0102 marking), live, at the stream's pace.
 
 The command line is laid out so each lands as one module in `src/cli/` (see [CONTRIBUTING.md](CONTRIBUTING.md)).
 

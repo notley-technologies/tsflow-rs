@@ -23,6 +23,8 @@
 //! | [`monitor`] | Live and offline analysis: CC, PCR, PSI, bitrate, programs, KLV (ST 0601, ST 0102 marking) |
 //! | [`expect`] | Assertions on a monitor summary for scripts |
 //! | [`recv`] | The receive loop: monitor, forward, record |
+//! | [`live`] | Live KLV injection: a live stream through `misb::mux::LiveMux`, values from a control channel |
+//! | [`control`] | Control lines for live injection, read from stdin, a file, UDP or a Unix socket |
 //!
 //! # Example
 //!
@@ -60,6 +62,7 @@
 #![warn(missing_docs)]
 
 pub mod clock;
+pub mod control;
 pub mod endpoint;
 mod error;
 pub mod expect;
@@ -67,6 +70,7 @@ pub mod framer;
 pub mod inject;
 pub mod input;
 mod json;
+pub mod live;
 pub mod looping;
 pub mod monitor;
 mod net;

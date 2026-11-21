@@ -1,16 +1,19 @@
 //! `tsflow inject`: put a metadata file into a transport stream.
 
 use super::{parse_pid, Context, EXIT_CHECK_FAILED};
-use misb::mpegts::mux::{ExistingKlv, InjectEvent, OnOverflow, ProgramSelect, RateMode};
-use misb::mux::{AnchorSpec, Carriage, FileMuxConfig, FileMuxStats, Rate, Sample};
+use misb::mpegts::mux::{ExistingKlv, InjectEvent, OnOverflow, ProgramSelect, RateMode, RecordFormat};
+use misb::mux::{
+    AnchorSpec, Carriage, FileMux, FileMuxConfig, FileMuxStats, Rate, Sample, VideoTimestampOptions, VideoTimestamps,
+};
 use misb::{LeapSeconds, MispTime, UtcDateTime};
 use std::fs::File;
-use std::io::{BufReader, Read};
+use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 use tsflow::clock::SystemClock;
 use tsflow::endpoint::{Endpoint, DEFAULT_PACKETS_PER_DATAGRAM, MAX_PACKETS_PER_DATAGRAM};
+use tsflow::framer::PacketFormat;
 use tsflow::inject::{InjectStage, KlvFile, NdjsonFile, SourceError};
 use tsflow::input::Input;
 use tsflow::output::Output;
@@ -44,7 +47,15 @@ Anchor (where MISP time meets the program clock):
 
 Rate: explicit (every sample at its own time), frame (every video frame),
 every=N (every Nth frame), or a rate such as 30hz or 10hz (at most that
-many per second, on video frames).
+many per second, on video frames). With a frame rate and --interpolate,
+each item moves between the records that carry it (linear, the short way
+around for angles, along the great circle for positions, held for text and
+codes; a record's \"interpolate\" object overrides per item).
+
+Video timestamps (MISB ST 0604, in H.264/H.265 SEI): --video-anchor takes
+MISP time from the input's timestamps when it has them (the best anchor);
+--video-timestamps add|rewrite writes one into every access unit, with
+the anchor's time, so video and metadata share a clock.
 
 Every input packet goes out unchanged except the PAT, the target PMT
 (rewritten with the KLV stream, version + 1) and the KLV PID. Sync KLV
@@ -53,7 +64,7 @@ frame (ISO/IEC 13818-1, MISB ST 1402.2); late samples are counted, never
 sent late. Exit status 1 with --strict when any sample was not inserted.";
 
 #[derive(Clone, Copy, clap::ValueEnum)]
-enum Mode {
+pub(super) enum Mode {
     /// Synchronous KLV: stream_type 0x15, a PTS on every packet
     Sync,
     /// Asynchronous KLV: stream_type 0x06 (SMPTE RP 217), no PTS
@@ -61,13 +72,44 @@ enum Mode {
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
-enum Existing {
+pub(super) enum Existing {
     /// Keep it; sync joins an existing sync stream as a new metadata service
     Keep,
     /// Remove the program's KLV streams
     Replace,
     /// Stop with an error
     Fail,
+}
+
+impl From<Existing> for ExistingKlv {
+    fn from(e: Existing) -> ExistingKlv {
+        match e {
+            Existing::Keep => ExistingKlv::Keep,
+            Existing::Replace => ExistingKlv::Replace,
+            Existing::Fail => ExistingKlv::Fail,
+        }
+    }
+}
+
+/// MISB ST 0604 timestamps in the video.
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub(super) enum TimestampMode {
+    /// Never change the video
+    Off,
+    /// Add a timestamp to access units without one
+    Add,
+    /// Every access unit gets the muxer's time; existing timestamps are replaced
+    Rewrite,
+}
+
+impl From<TimestampMode> for VideoTimestamps {
+    fn from(m: TimestampMode) -> VideoTimestamps {
+        match m {
+            TimestampMode::Off => VideoTimestamps::Off,
+            TimestampMode::Add => VideoTimestamps::AddWhenMissing,
+            TimestampMode::Rewrite => VideoTimestamps::Rewrite,
+        }
+    }
 }
 
 #[derive(clap::Args)]
@@ -106,6 +148,27 @@ pub struct Args {
     /// When sampling at frames, how long a sample stays valid, in ms (0: until the next sample)
     #[arg(long, value_name = "MS", default_value_t = 3000)]
     hold: u32,
+
+    /// When sampling at frames, interpolate between samples (linear, the short way for angles,
+    /// great circle for positions; per-record "interpolate" hints) instead of holding the latest
+    #[arg(long)]
+    interpolate: bool,
+
+    /// Take MISP time from the video's ST 0604 timestamps when it carries them (ahead of --anchor)
+    #[arg(long)]
+    video_anchor: bool,
+
+    /// Write ST 0604 timestamps into H.264/H.265 video: off, add (where missing) or rewrite
+    #[arg(long, value_enum, default_value_t = TimestampMode::Off)]
+    video_timestamps: TimestampMode,
+
+    /// Written timestamps assert lock to an absolute time reference (ST 0603 Time Status)
+    #[arg(long)]
+    time_locked: bool,
+
+    /// H.265: write nanosecond ST 0604 timestamps
+    #[arg(long)]
+    nanoseconds: bool,
 
     /// What to do when the program already carries KLV
     #[arg(long, value_enum, default_value_t = Existing::Keep)]
@@ -161,7 +224,7 @@ pub struct Args {
 }
 
 /// TIME: UTC, or misp:MICROSECONDS.
-fn parse_time(s: &str) -> Result<MispTime, String> {
+pub(super) fn parse_time(s: &str) -> Result<MispTime, String> {
     if let Some(us) = s.strip_prefix("misp:") {
         return us.parse().map(MispTime::from_micros).map_err(|_| format!("\"{us}\" is not a count of microseconds"));
     }
@@ -189,7 +252,7 @@ fn parse_anchor(s: &str) -> Result<AnchorSpec, String> {
     Err(format!("\"{s}\": expected source-start, first-frame=TIME or pts=PTS@TIME"))
 }
 
-fn parse_rate(s: &str) -> Result<Rate, String> {
+pub(super) fn parse_rate(s: &str) -> Result<Rate, String> {
     let lower = s.to_ascii_lowercase();
     let rate = match lower.as_str() {
         "explicit" => Rate::Explicit,
@@ -217,7 +280,7 @@ fn open(path: &PathBuf) -> Result<Box<dyn Read>, Error> {
         .map_err(|e| Error::Config(format!("open {}: {e}", path.display())))
 }
 
-fn utc(t: MispTime) -> String {
+pub(super) fn utc(t: MispTime) -> String {
     t.to_utc(LeapSeconds::builtin()).map_or_else(|| format!("misp:{}", t.as_micros()), |u| u.to_string())
 }
 
@@ -248,11 +311,15 @@ pub fn run(a: Args, ctx: &Context) -> Result<ExitCode, Error> {
     cfg.schedule.anchor = a.anchor;
     cfg.schedule.snap_to_frames = a.snap;
     cfg.schedule.max_hold_ms = (a.hold > 0).then_some(a.hold);
-    let mut inject = cfg.inject.clone().with_psi_interval_ms(a.psi_interval).with_existing_klv(match a.existing {
-        Existing::Keep => ExistingKlv::Keep,
-        Existing::Replace => ExistingKlv::Replace,
-        Existing::Fail => ExistingKlv::Fail,
-    });
+    if a.interpolate {
+        cfg.schedule.interpolate = Some(misb::track::TrackConfig::new());
+    }
+    cfg.schedule.video_anchor = a.video_anchor;
+    let mut ts = VideoTimestampOptions::new(a.video_timestamps.into());
+    ts.locked = a.time_locked.then_some(true);
+    ts.nanoseconds = a.nanoseconds;
+    cfg.video_timestamps = ts;
+    let mut inject = cfg.inject.clone().with_psi_interval_ms(a.psi_interval).with_existing_klv(a.existing.into());
     if let Some(n) = a.program {
         inject = inject.with_program(ProgramSelect::Number(n));
     }
@@ -279,6 +346,29 @@ pub fn run(a: Args, ctx: &Context) -> Result<ExitCode, Error> {
         let e = f.error();
         (Box::new(f), e)
     };
+    // An M2TS file written to a file keeps its 192-byte records: the
+    // injector takes them whole and stamps what it inserts between its
+    // neighbours' arrival times.
+    let m2ts = probe.as_ref().is_some_and(|p| p.format == Some(PacketFormat::M2ts))
+        && !a.pace
+        && !matches!(a.output, Endpoint::Net(_));
+    if m2ts {
+        cfg.inject = cfg.inject.clone().with_record_format(RecordFormat::M2ts);
+        let Endpoint::File(in_path) = &a.input else {
+            return Err(Error::Config("M2TS input must be a file".into()));
+        };
+        let mut mux = FileMux::new(cfg, source).map_err(|e| Error::Inject(e.to_string()))?;
+        eprintln!(
+            "tsflow inject: {} + {} -> {} (192-byte M2TS records kept, no pacing)",
+            in_path.display(),
+            name,
+            a.output
+        );
+        let result = inject_records(in_path, &a.output, &mut mux, &source_error);
+        let summary = Summary::of(&mut mux);
+        let (records_in, records_out, stats) = result?;
+        return finish(&a, summary, stats, records_in, records_out);
+    }
     let mut stage = InjectStage::new(cfg, source, source_error)?;
 
     let mut output = Output::open(&a.output, a.burst)?;
@@ -329,17 +419,83 @@ pub fn run(a: Args, ctx: &Context) -> Result<ExitCode, Error> {
         &mut status,
     );
     // Events say what the injector decided; print them even after an error.
-    let mux = stage.mux();
-    let target = mux.injector().target().cloned();
-    let anchor = mux.anchor();
-    let mut warnings = Vec::new();
-    while let Some(ev) = mux.pop_event() {
-        if let InjectEvent::Warning(w) = ev {
-            warnings.push(format!("{w:?}"));
+    let summary = Summary::of(stage.mux());
+    let played = result?;
+    finish(&a, summary, stage.stats(), played.packets_in, played.packets_out)
+}
+
+/// What the muxer decided, collected before its result is looked at.
+struct Summary {
+    target: Option<misb::mpegts::mux::Target>,
+    anchor: Option<misb::mux::Anchor>,
+    warnings: Vec<String>,
+}
+
+impl Summary {
+    fn of<S: Iterator<Item = Sample>>(mux: &mut FileMux<S>) -> Summary {
+        let mut warnings = Vec::new();
+        while let Some(ev) = mux.pop_event() {
+            if let InjectEvent::Warning(w) = ev {
+                warnings.push(format!("{w:?}"));
+            }
+        }
+        Summary { target: mux.injector().target().cloned(), anchor: mux.anchor(), warnings }
+    }
+}
+
+/// Read 192-byte records from `input`, inject, write records to `output`.
+/// Returns records in, records out, and the final counters.
+fn inject_records<S: Iterator<Item = Sample>>(
+    input: &std::path::Path,
+    output: &Endpoint,
+    mux: &mut FileMux<S>,
+    source_error: &SourceError,
+) -> Result<(u64, u64, FileMuxStats), Error> {
+    let mut reader = File::open(input).map_err(|e| Error::Config(format!("open {}: {e}", input.display())))?;
+    let mut writer: Box<dyn Write> = match output {
+        Endpoint::File(p) => Box::new(BufWriter::new(
+            File::create(p).map_err(|e| Error::Config(format!("create {}: {e}", p.display())))?,
+        )),
+        _ => Box::new(BufWriter::new(std::io::stdout())),
+    };
+    let (mut records_in, mut records_out) = (0u64, 0u64);
+    let mut buf = vec![0u8; 192 * 1024];
+    let mut out = Vec::with_capacity(buf.len() + 64 * 192);
+    loop {
+        let n = reader.read(&mut buf).map_err(|e| Error::Config(format!("read {}: {e}", input.display())))?;
+        if n == 0 {
+            break;
+        }
+        records_in += (n / 192) as u64;
+        let r = mux.push(&buf[..n], &mut out);
+        records_out += (out.len() / 192) as u64;
+        writer.write_all(&out).map_err(|e| Error::Config(format!("write {output}: {e}")))?;
+        out.clear();
+        r.map_err(|e| Error::Inject(e.to_string()))?;
+        if let Some(e) = source_error.get() {
+            return Err(Error::Inject(e));
         }
     }
-    let played = result?;
-    let stats = stage.stats();
+    let stats = mux.finish(&mut out);
+    records_out += (out.len() / 192) as u64;
+    writer.write_all(&out).and_then(|()| writer.flush()).map_err(|e| Error::Config(format!("write {output}: {e}")))?;
+    let stats = stats.map_err(|e| Error::Inject(e.to_string()))?;
+    if let Some(e) = source_error.get() {
+        return Err(Error::Inject(e));
+    }
+    Ok((records_in, records_out, stats))
+}
+
+/// Print the outcome and pick the exit status.
+fn finish(
+    a: &Args,
+    summary: Summary,
+    stats: FileMuxStats,
+    packets_in: u64,
+    packets_out: u64,
+) -> Result<ExitCode, Error> {
+    let Summary { target, anchor, warnings } = summary;
+    let played = Played { packets_in, packets_out };
     let skipped = skipped(&stats);
 
     if a.json {
@@ -385,6 +541,12 @@ pub fn run(a: Args, ctx: &Context) -> Result<ExitCode, Error> {
         return Ok(ExitCode::from(EXIT_CHECK_FAILED));
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// Packets (or records) in and out.
+struct Played {
+    packets_in: u64,
+    packets_out: u64,
 }
 
 /// Samples that did not make it into the output.

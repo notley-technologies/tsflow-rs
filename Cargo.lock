@@ -123,7 +123,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 [[package]]
 name = "misb"
 version = "0.2.0"
-source = "git+https://github.com/notley-technologies/misb-rs?rev=8e65a01d7fa36eae2c3db8c498a75a8ab7831bb0#8e65a01d7fa36eae2c3db8c498a75a8ab7831bb0"
+source = "git+https://github.com/notley-technologies/misb-rs?rev=1faba23182f511b0c2c7a791b1812176368f6843#1faba23182f511b0c2c7a791b1812176368f6843"
 dependencies = [
  "mpegts",
  "serde",
@@ -134,7 +134,7 @@ dependencies = [
 [[package]]
 name = "mpegts"
 version = "0.2.0"
-source = "git+https://github.com/notley-technologies/mpegts-rs?rev=a48700dc6eba70722afda56e2e9d9f547f15f59d#a48700dc6eba70722afda56e2e9d9f547f15f59d"
+source = "git+https://github.com/notley-technologies/mpegts-rs?rev=c0770e64e623d2b8cc04b704bdf81b702adfbb85#c0770e64e623d2b8cc04b704bdf81b702adfbb85"
 
 [[package]]
 name = "nix"
