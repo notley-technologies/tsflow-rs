@@ -1,0 +1,60 @@
+[package]
+name = "tsflow"
+version = "0.1.0"
+edition = "2021"
+# clap 4.5 needs 1.74; the code itself builds on 1.75, the toolchain the
+# project is built and tested with.
+rust-version = "1.75"
+description = "MPEG transport stream toolkit: PCR-paced playback, UDP/RTP send and receive, live monitoring and analysis, with KLV (MISB ST 0601) awareness"
+repository = "https://github.com/notley-technologies/tsflow-rs"
+readme = "README.md"
+keywords = ["mpeg-ts", "transport-stream", "udp", "rtp", "klv"]
+categories = ["multimedia::video", "command-line-utilities", "network-programming"]
+license = "Apache-2.0"
+# The git dependencies below are not on crates.io yet.
+publish = false
+exclude = ["*.ts", "*.m2ts", "target"]
+
+[lib]
+name = "tsflow"
+path = "src/lib.rs"
+
+[[bin]]
+name = "tsflow"
+path = "src/main.rs"
+required-features = ["cli"]
+
+[features]
+default = ["cli"]
+## The `tsflow` command line and its dependencies. Library users can turn
+## it off with `default-features = false`.
+cli = ["dep:clap", "dep:ctrlc"]
+
+# The sibling libraries, pinned by revision (they move together; see
+# MUXING_PLAN.md section 3). Neither does I/O; tsflow does.
+[dependencies]
+mpegts = { git = "https://github.com/notley-technologies/mpegts-rs", rev = "a48700dc6eba70722afda56e2e9d9f547f15f59d", features = ["mux"], default-features = false }
+# mux: FileMux and the scheduler; json: NDJSON authoring records.
+misb = { git = "https://github.com/notley-technologies/misb-rs", rev = "8e65a01d7fa36eae2c3db8c498a75a8ab7831bb0", default-features = false, features = ["mux", "json"] }
+# Socket options std lacks: buffer sizes, SO_REUSEADDR, IP_MULTICAST_IF,
+# source-specific multicast. 0.5 builds on Rust 1.63.
+socket2 = "0.5.10"
+# 4.6 needs Rust 1.85; 4.5 builds on 1.75.
+clap = { version = "~4.5.61", default-features = false, features = ["std", "derive", "help", "usage", "error-context"], optional = true }
+ctrlc = { version = "3.4", optional = true }
+
+[dev-dependencies]
+# The same revision with the encoder, to build synthetic test streams.
+misb = { git = "https://github.com/notley-technologies/misb-rs", rev = "8e65a01d7fa36eae2c3db8c498a75a8ab7831bb0", default-features = false, features = ["encode", "mux", "json"] }
+
+[[test]]
+name = "cli"
+required-features = ["cli"]
+
+[[test]]
+name = "inject"
+required-features = ["cli"]
+
+[profile.release]
+lto = true
+codegen-units = 1

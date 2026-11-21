@@ -1,0 +1,16 @@
+/target
+
+# Local Cargo overrides (for example a [patch] of the git dependencies)
+# stay out of the repository.
+.cargo/config.toml
+
+# Transport stream captures stay out of the repository. Tests generate
+# synthetic streams instead.
+*.ts
+*.m2ts
+
+# Editors and OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
