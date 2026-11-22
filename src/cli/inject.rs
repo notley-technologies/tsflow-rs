@@ -1,7 +1,7 @@
 //! `tsflow inject`: put a metadata file into a transport stream.
 
 use super::{parse_pid, Context, EXIT_CHECK_FAILED};
-use misb::mpegts::mux::{ExistingKlv, InjectEvent, OnOverflow, ProgramSelect, RateMode, RecordFormat};
+use misb::mpegts::mux::{CellNumbering, ExistingKlv, InjectEvent, OnOverflow, ProgramSelect, RateMode, RecordFormat};
 use misb::mux::{
     AnchorSpec, Carriage, FileMux, FileMuxConfig, FileMuxStats, Rate, Sample, VideoTimestampOptions, VideoTimestamps,
 };
@@ -87,6 +87,24 @@ impl From<Existing> for ExistingKlv {
             Existing::Keep => ExistingKlv::Keep,
             Existing::Replace => ExistingKlv::Replace,
             Existing::Fail => ExistingKlv::Fail,
+        }
+    }
+}
+
+/// How synchronous KLV numbers its metadata access unit cells.
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub(super) enum Cells {
+    /// One counter per stream, +1 per cell (ISO/IEC 13818-1, MISB ST 1402)
+    Stream,
+    /// From 0 in each access unit: a workaround for receivers that require it, such as MediaMTX
+    AccessUnit,
+}
+
+impl From<Cells> for CellNumbering {
+    fn from(c: Cells) -> CellNumbering {
+        match c {
+            Cells::Stream => CellNumbering::PerStream,
+            Cells::AccessUnit => CellNumbering::PerAccessUnit,
         }
     }
 }
@@ -185,6 +203,10 @@ pub struct Args {
     /// metadata_service_id [default: the lowest unused]
     #[arg(long, value_name = "N")]
     service_id: Option<u8>,
+
+    /// How sync KLV numbers its metadata cells
+    #[arg(long, value_enum, default_value_t = Cells::Stream)]
+    cell_numbering: Cells,
 
     /// Keep the packet count and every PCR in place: KLV and tables replace null packets
     #[arg(long)]
@@ -320,6 +342,7 @@ pub fn run(a: Args, ctx: &Context) -> Result<ExitCode, Error> {
     ts.nanoseconds = a.nanoseconds;
     cfg.video_timestamps = ts;
     let mut inject = cfg.inject.clone().with_psi_interval_ms(a.psi_interval).with_existing_klv(a.existing.into());
+    inject.sync.cell_numbering = a.cell_numbering.into();
     if let Some(n) = a.program {
         inject = inject.with_program(ProgramSelect::Number(n));
     }

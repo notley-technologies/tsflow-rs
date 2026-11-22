@@ -186,6 +186,53 @@ fn cbr_keeps_the_size() {
     }
 }
 
+/// sequence_number of each synchronous KLV cell on the output, in order.
+fn cell_numbers(ts: &[u8]) -> Vec<u8> {
+    let mut d = Demuxer::new();
+    d.subscribe(Subscription::new(Select::Codec(Codec::KlvSync), Unit::Pes)).unwrap();
+    d.push(ts);
+    d.finish();
+    let mut seqs = Vec::new();
+    while let Some(o) = d.pop_output() {
+        seqs.push(o.payload()[1]);
+        d.recycle(o);
+    }
+    seqs
+}
+
+#[test]
+fn cells_are_numbered_per_stream_unless_asked() {
+    // ISO/IEC 13818-1 2.12.4.1 and MISB ST 1402: one counter per stream
+    // (DECISIONS X-8); --cell-numbering access-unit starts every access
+    // unit at 0, for receivers such as MediaMTX.
+    let stream = video(30);
+    let input = temp_file("cells-in.ts", &stream.data);
+    let state = temp_file("cells-state.ndjson", b"{\"set\": {\"SensorLatitude\": 38.9}}\n");
+    let packets: Vec<Vec<u8>> = (0..20).map(|k| packet(MISP_START + k * 100_000)).collect();
+    let klv = temp_file("cells.klv", &packets.concat());
+    let output = temp_path("cells-out.ts");
+    let (i, o, st, k) =
+        (input.to_str().unwrap(), output.to_str().unwrap(), state.to_str().unwrap(), klv.to_str().unwrap());
+    for (args, per_stream) in [
+        (vec!["live", i, o, "--state", st, "--rate", "frame", "-q"], true),
+        (vec!["live", i, o, "--state", st, "--rate", "frame", "-q", "--cell-numbering", "access-unit"], false),
+        (vec!["inject", i, o, "--klv", k], true),
+        (vec!["inject", i, o, "--klv", k, "--cell-numbering", "access-unit"], false),
+    ] {
+        let out = run(&args);
+        assert!(out.status.success(), "{args:?}: {}", text(&out.stderr));
+        let seqs = cell_numbers(&std::fs::read(&output).unwrap());
+        assert!(seqs.len() >= 20, "{args:?}: {seqs:?}");
+        let expected: Vec<u8> = (0..seqs.len()).map(|n| if per_stream { n as u8 } else { 0 }).collect();
+        assert_eq!(seqs, expected, "{args:?}");
+    }
+    let out = run(&["live", i, o, "--cell-numbering", "per-pes"]);
+    assert_eq!(out.status.code(), Some(2));
+    for p in [input, state, klv, output] {
+        std::fs::remove_file(p).unwrap();
+    }
+}
+
 #[test]
 fn errors_and_strict() {
     let input = temp_file("inject-err-in.ts", &video(25).data);

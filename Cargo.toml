@@ -33,9 +33,9 @@ cli = ["dep:clap", "dep:ctrlc"]
 # The sibling libraries, pinned by revision (they move together; see
 # MUXING_PLAN.md section 3). Neither does I/O; tsflow does.
 [dependencies]
-mpegts = { git = "https://github.com/notley-technologies/mpegts-rs", rev = "c0770e64e623d2b8cc04b704bdf81b702adfbb85", features = ["mux"], default-features = false }
+mpegts = { git = "https://github.com/notley-technologies/mpegts-rs", rev = "79861e330b35d92637818d598b894ea2dfd7215d", features = ["mux"], default-features = false }
 # mux: FileMux and the scheduler; json: NDJSON authoring records.
-misb = { git = "https://github.com/notley-technologies/misb-rs", rev = "1faba23182f511b0c2c7a791b1812176368f6843", default-features = false, features = ["mux", "json"] }
+misb = { git = "https://github.com/notley-technologies/misb-rs", rev = "a86f4f9ce0a1eb6d392c5a411b5fa72c3ecbe05e", default-features = false, features = ["mux", "json"] }
 # Socket options std lacks: buffer sizes, SO_REUSEADDR, IP_MULTICAST_IF,
 # source-specific multicast. 0.5 builds on Rust 1.63.
 socket2 = "0.5.10"
@@ -45,7 +45,7 @@ ctrlc = { version = "3.4", optional = true }
 
 [dev-dependencies]
 # The same revision with the encoder, to build synthetic test streams.
-misb = { git = "https://github.com/notley-technologies/misb-rs", rev = "1faba23182f511b0c2c7a791b1812176368f6843", default-features = false, features = ["encode", "mux", "json"] }
+misb = { git = "https://github.com/notley-technologies/misb-rs", rev = "a86f4f9ce0a1eb6d392c5a411b5fa72c3ecbe05e", default-features = false, features = ["encode", "mux", "json"] }
 
 [[test]]
 name = "cli"

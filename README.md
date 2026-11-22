@@ -20,7 +20,7 @@ tsflow recv     <INPUT> [--forward OUTPUT] [--out FILE] [--idle-exit S] [--durat
 tsflow analyze  <FILE> [--expect CHECK]... [--json]
 tsflow inject   <INPUT> <OUTPUT> (--klv FILE | --ndjson FILE) [--mode sync|async] [--rate RATE] [--anchor ANCHOR] [--snap]
                 [--interpolate] [--video-anchor] [--video-timestamps off|add|rewrite]
-                [--existing keep|replace|fail] [--program N] [--pid PID] [--cbr [--drop-on-overflow]] [--pace | --no-pace] [--strict] [--json]
+                [--existing keep|replace|fail] [--program N] [--pid PID] [--cell-numbering stream|access-unit] [--cbr [--drop-on-overflow]] [--pace | --no-pace] [--strict] [--json]
 tsflow live     <INPUT> <OUTPUT> [--state FILE] [--control SOURCE]... [--mode sync|async] [--rate RATE] [--anchor ANCHOR]
                 [--video-anchor] [--video-timestamps off|add|rewrite] [--max-age MS] [--cbr] [--duration S] [--json]
 ```
@@ -160,6 +160,7 @@ tsflow inject: 100 KLV units inserted from 100 samples; 8000 packets in, 7980 ou
 ```
 
 - **What changes.** Every input packet goes out unchanged except the PAT (resent as it is), the target program's PMT (rewritten with the KLV stream, version + 1, new CRC) and the KLV PID. `--existing keep` (default) joins an existing synchronous KLV stream as a new metadata service (ST 1402-13); `replace` removes the program's KLV; `fail` stops.
+- **Cell numbering.** Synchronous KLV numbers its metadata access unit cells with one counter per stream, as ISO/IEC 13818-1 and MISB ST 1402 ask. MediaMTX (through `mediacommon` v2.9.7 at least) refuses a PES packet whose first cell is not 0 and so drops 255 of every 256 units; for such a receiver, `--cell-numbering access-unit` starts every access unit at 0.
 - **Metadata.** `--klv`: recorded ST 0601 packets, written byte for byte at their own tag 2 time; damaged packets and packets without tag 2 are skipped and counted. `--ndjson`: authoring records (the `misb::json` format), each at its own time, or sampled at video frames with `--rate frame`, `every=N` or a rate such as `30hz`, tag 2 being the frame's own time. Both are read incrementally, so the file size does not matter.
 - **Anchor.** Where MISP time meets the program clock: `source-start` (the first video frame is at the first sample's time, the default), `first-frame=TIME`, or `pts=PTS@TIME`, with TIME in UTC (converted with the leap second table) or `misp:MICROSECONDS`. `--snap` moves recorded packets' PTS to the nearest frame without touching tag 2.
 - **Timing.** Synchronous KLV arrives 990 ms to 1 ms before its PTS, right before its video frame (ISO/IEC 13818-1, MISB ST 1402.2). Samples that would be late are counted, never sent late; `--strict` turns any sample left out into exit status 1.
@@ -195,7 +196,7 @@ tsflow live: end of input after 0.0 s; 765 packets in, 894 out; 60 frames, 60 KL
 - **Latency.** The output leaves as the input arrives: nothing is paced or buffered, and the injector extrapolates the program clock instead of waiting for the next PCR. Only `--video-timestamps` holds each frame until its first slice has been read. A file input is read as fast as possible; play it through `tsflow play FILE -` for real time.
 - **Anchor.** `wall` (default): the first frame is at the wall-clock time it arrived, again after a clock discontinuity; `first-frame=TIME` or `pts=PTS@TIME` as in `inject`; `--video-anchor` puts the video's ST 0604 timestamps first.
 - **Staleness.** `--max-age MS` leaves out (or with `--stale-unknown` marks unknown) any value older than that, so a dead sensor feed is not reported forever.
-- **The rest** (`--existing`, `--program`, `--pid`, `--service-id`, `--cbr`, `--psi-interval`) works as in `inject`. `--duration`, `--idle-exit` and `--count` end a run; `--json` prints the summary as JSON.
+- **The rest** (`--existing`, `--program`, `--pid`, `--service-id`, `--cell-numbering`, `--cbr`, `--psi-interval`) works as in `inject`. `--duration`, `--idle-exit` and `--count` end a run; `--json` prints the summary as JSON.
 
 The work is done by `misb::mux::LiveMux`; tsflow reads the sockets and the control channel and keeps the wall clock.
 

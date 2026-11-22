@@ -1,6 +1,6 @@
 //! `tsflow live`: inject KLV into a live stream from a control channel.
 
-use super::inject::{parse_rate, parse_time, utc, Existing, Mode, TimestampMode};
+use super::inject::{parse_rate, parse_time, utc, Cells, Existing, Mode, TimestampMode};
 use super::{parse_pid, parse_seconds, stamp, Context};
 use misb::mpegts::mux::{InjectEvent, OnOverflow, ProgramSelect, RateMode};
 use misb::mux::{Carriage, LiveAnchor, LiveMux, LiveMuxConfig, Rate, VideoTimestampOptions};
@@ -112,6 +112,10 @@ pub struct Args {
     #[arg(long, value_name = "N")]
     service_id: Option<u8>,
 
+    /// How sync KLV numbers its metadata cells
+    #[arg(long, value_enum, default_value_t = Cells::Stream)]
+    cell_numbering: Cells,
+
     /// Keep the packet count and every PCR in place: KLV and tables replace null packets
     #[arg(long)]
     cbr: bool,
@@ -180,6 +184,7 @@ fn config(a: &Args) -> LiveMuxConfig {
     ts.nanoseconds = a.nanoseconds;
     cfg.video_timestamps = ts;
     let mut inject = cfg.inject.clone().with_psi_interval_ms(a.psi_interval).with_existing_klv(a.existing.into());
+    inject.sync.cell_numbering = a.cell_numbering.into();
     if let Some(n) = a.program {
         inject = inject.with_program(ProgramSelect::Number(n));
     }
